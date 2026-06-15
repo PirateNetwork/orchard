@@ -113,6 +113,12 @@ pub struct Config {
 /// [`InsecurePreNu6_2`] reconstructs the historical (NU5..NU6.2) verifying key solely to
 /// verify proofs produced before NU6.2.
 ///
+/// **Pirate deployment note:** Pirate never deployed [`InsecurePreNu6_2`] on any live
+/// network. The Pirate chain launched with [`FixedPostNu6_2`] as its only Orchard circuit
+/// version. [`InsecurePreNu6_2`] is retained in this codebase exclusively for
+/// cross-compatibility testing against upstream Zcash proof fixtures and must not be
+/// used in any production proving or verification path.
+///
 /// This is a runtime value rather than a type parameter: it is carried in [`Circuit`] and
 /// chosen when building a [`ProvingKey`] or [`VerifyingKey`], so the circuit version can be
 /// threaded dynamically (e.g. across an FFI boundary).
@@ -124,6 +130,11 @@ pub enum OrchardCircuitVersion {
     /// The insecure pre-NU6.2 circuit, in which the variable-base scalar-multiplication base
     /// is not anchored to the real base. For reconstructing the historical (NU5..NU6.2)
     /// verifying key only — never for proving or current verification.
+    ///
+    /// **Pirate note:** this variant was never used on the Pirate network. It is present
+    /// solely for test-suite cross-compatibility with upstream Zcash proof fixtures.
+    /// Production code is guarded by a `#[cfg(not(test))]` panic in
+    /// [`VerifyingKey::build_for_version`] and a runtime assertion in `orchard_ffi`.
     InsecurePreNu6_2,
     /// The fixed circuit, active from NU6.2 onward. Used for all proving and current
     /// verification.
@@ -838,6 +849,10 @@ impl plonk::Circuit<pallas::Base> for Circuit {
 pub struct VerifyingKey {
     pub(crate) params: halo2_proofs::poly::commitment::Params<vesta::Affine>,
     pub(crate) vk: plonk::VerifyingKey<vesta::Affine>,
+    /// The circuit version this key was built for. Stored so callers can assert
+    /// at runtime that only [`OrchardCircuitVersion::FixedPostNu6_2`] is used
+    /// for live-network verification.
+    pub(crate) circuit_version: OrchardCircuitVersion,
 }
 
 impl VerifyingKey {
@@ -847,7 +862,24 @@ impl VerifyingKey {
     }
 
     /// Builds the verifying key for the given circuit version.
+    ///
+    /// # Panics
+    ///
+    /// Panics outside of `#[cfg(test)]` if `circuit_version` is
+    /// [`OrchardCircuitVersion::InsecurePreNu6_2`]. The insecure pre-NU6.2 key
+    /// must never be used for live-network verification; it exists only to
+    /// reconstruct the historical verifying key in tests.
+    ///
+    /// **Pirate note:** [`OrchardCircuitVersion::InsecurePreNu6_2`] was never
+    /// deployed on the Pirate network. All Pirate Orchard proofs were produced
+    /// and verified under [`OrchardCircuitVersion::FixedPostNu6_2`].
     pub fn build_for_version(circuit_version: OrchardCircuitVersion) -> Self {
+        #[cfg(not(test))]
+        assert!(
+            circuit_version == OrchardCircuitVersion::FixedPostNu6_2,
+            "InsecurePreNu6_2 verifying key must not be built outside of tests"
+        );
+
         let params = halo2_proofs::poly::commitment::Params::new(K);
         let circuit = Circuit {
             circuit_version,
@@ -856,7 +888,12 @@ impl VerifyingKey {
 
         let vk = plonk::keygen_vk(&params, &circuit).unwrap();
 
-        VerifyingKey { params, vk }
+        VerifyingKey { params, vk, circuit_version }
+    }
+
+    /// Returns the circuit version this verifying key was built for.
+    pub fn circuit_version(&self) -> OrchardCircuitVersion {
+        self.circuit_version
     }
 }
 
